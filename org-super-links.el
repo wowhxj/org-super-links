@@ -337,31 +337,113 @@ Where the backlink is placed is determined by the variable `org-super-links-back
 	 (description (org-super-links-default-description-formatter link-ref pre-desc)))
     (cons link-ref description)))
 
-(defun org-super-links--insert-link (target &optional no-forward)
-  "Insert link to marker TARGET at current `point`, and create backlink to here.
+;;;###autoload
+(defun org-super-links--insert-link (target headline &optional no-forward)
+  "Insert link to marker TARGET with HEADLINE at current `point`, and create backlink to here.
+Uses file:filename::heading format instead of ID links.
 Only create backlinks in files in `org-mode' or a derived mode, otherwise just
 act like a normal link.
 
 If NO-FORWARD is non-nil skip creating the forward link.  Currently
-only used when converting a link."
+only used when converting a link.
+MODIFIED version."
   (let* ((source (point-marker))
-	 (source-link (org-super-links-links-action source 'org-super-links-pre-link-hook))
-	 (target-link (org-super-links-links-action target 'org-super-links-pre-backlink-hook))
-	 (source-formatted-link (org-super-links-link-builder source-link))
-	 (target-formatted-link (org-super-links-link-builder target-link)))
+         (source-headline (org-get-heading t t t t))
+         (source-link (org-super-links-links-action source 'org-super-links-pre-link-hook))
+         (target-link (org-super-links-links-action target 'org-super-links-pre-backlink-hook))
+         (source-formatted-link (org-super-links-link-builder source-link))
+         (target-formatted-link (org-super-links-link-builder target-link))
+         (source-file (file-relative-name (buffer-file-name (marker-buffer source))
+                                          (file-name-directory (buffer-file-name (marker-buffer target)))))
+         (target-file (buffer-file-name (marker-buffer target)))
+         (source-link (format "file:%s::%s" source-file source-headline))
+         (target-link (format "file:%s::%s" target-file headline)))
     (with-current-buffer (marker-buffer target)
       (save-excursion
-        (save-restriction
-          (widen) ;; buffer could be narrowed
-          (goto-char (marker-position target))
-          (when (derived-mode-p 'org-mode)
-            (org-super-links-insert-backlink (car source-formatted-link) (cdr source-formatted-link))))))
+        (goto-char (marker-position target))
+        ;; 插入时禁用 CUSTOM_ID，怀疑是 denote 用的
+        (when (org-entry-get (point) "CUSTOM_ID")
+          (org-entry-delete (point) "CUSTOM_ID"))
+        (when (derived-mode-p 'org-mode)
+          (org-super-links-insert-backlink source-link source-headline))))
     (unless no-forward
       (with-current-buffer (marker-buffer source)
-	(save-excursion
-	  (goto-char (marker-position source))
-	  (org-super-links-insert-relatedlink (car target-formatted-link) (cdr target-formatted-link)))))))
+        (save-excursion
+          (goto-char (marker-position source))
+          ;; 插入时禁用 CUSTOM_ID，怀疑是 denote 用的
+          (when (org-entry-get (point) "CUSTOM_ID")
+            (org-entry-delete (point) "CUSTOM_ID"))
+          (if (org-at-heading-p)
+              (org-super-links-insert-relatedlink target-link headline)
+            (org-super-links-insert-inline-link target-link headline source-headline)))))))
 
+;;;###autoload
+(defun org-super-links-insert-inline-link (target-link headline source-headline)
+  "Insert TARGET-LINK with HEADLINE at point and add related drawer at current heading.
+NEW ADDED version."
+  ;; (insert (org-super-links-link-prefix))
+  (org-insert-link nil target-link headline)
+  (insert (org-super-links-link-postfix))
+  (org-back-to-heading)
+  (org-super-links-insert-relatedlink target-link headline))
+
+;;;###autoload
+(defun org-super-links-insert-backlink (link desc)
+  "Insert backlink to LINK with DESC.
+Where the backlink is placed is determined by the variable `org-super-links-backlink-into-drawer`.
+NEW ADDED version."
+  (let* ((org-log-into-drawer (org-super-links-backlink-into-drawer))
+         (description (org-super-links-default-description-formatter link desc))
+         (beg (org-log-beginning t)))
+    (goto-char beg)
+    (insert (org-super-links-backlink-prefix))
+    (insert (org-link-make-string link description))
+    (insert (org-super-links-backlink-postfix))
+    (org-indent-region beg (point))))
+
+;;;###autoload
+(defun org-super-links-insert-relatedlink (link desc)
+  "Insert LINK with DESC into related drawer.
+NEW ADDED version."
+  (let* ((org-log-into-drawer (org-super-links-related-into-drawer))
+         (drawer-name (or org-log-into-drawer "RELATED"))
+         (beg (org-log-beginning t)))
+    (goto-char beg)
+    (unless (org-at-heading-p)
+      (org-back-to-heading t))
+    (org-narrow-to-subtree)
+    (let ((drawer-beg (re-search-forward (format ":%s:" drawer-name) nil t)))
+      (if drawer-beg
+          (progn
+            (goto-char drawer-beg)
+            (forward-line)
+            (insert (org-super-links-link-prefix))
+            (org-insert-link nil link desc)
+            (insert (org-super-links-link-postfix) "\n")
+            (org-indent-region drawer-beg (point)))
+        (goto-char (point-max))
+        (insert (format ":%s:\n" drawer-name))
+        (insert (org-super-links-link-prefix))
+        (org-insert-link nil link desc)
+        (insert (org-super-links-link-postfix) "\n")
+        (insert (format ":%s:\n" "END"))
+        (org-indent-region beg (point))))
+    (widen)))
+
+;;;###autoload
+(defun org-super-links-related-into-drawer ()
+  "Name of the related drawer, as a string, or nil.
+This is the value of `org-super-links-related-into-drawer`.  However, if the
+current entry has or inherits a RELATED_INTO_DRAWER property, it will
+be used instead of the default value.
+NEW ADDED version."
+  (let ((p (org-entry-get nil "RELATED_INTO_DRAWER" 'inherit t)))
+    (cond ((equal p "nil") nil)
+          ((equal p "t") org-super-links-related-drawer-default-name)
+          ((stringp p) p)
+          (p org-super-links-related-drawer-default-name)
+          ((stringp org-super-links-related-into-drawer) org-super-links-related-into-drawer)
+          (org-super-links-related-into-drawer org-super-links-related-drawer-default-name))))
 
 ;;;###autoload
 (defun org-super-links-convert-link-to-super (&optional arg)
@@ -406,36 +488,34 @@ This works from either side, and deletes both sides of a link."
 
 ;;;###autoload
 (defun org-super-links-store-link (&optional GOTO KEYS)
-  "Store a point to register for use in function `org-super-links-insert-link'.
+    "Store a point to the register for use in function `org-super-links-insert-link'.
 This is primarily intended to be called before `org-capture', but
 could possibly even be used to replace `org-store-link' IF
-function `org-super-links-insert-link' is used to replace
-`org-insert-link'.  This has not been thoroughly tested outside
-of links to/form org files.  GOTO and KEYS are unused."
-  (interactive "P")
-  (ignore GOTO)
-  (ignore KEYS)
-  (save-excursion
-    ;; this is a hack. if the point is at the first char of a heading
-    ;; the marker is not updated as expected when text is inserted
-    ;; above the heading. for example a capture template inserted
-    ;; above. that results in the link being to the heading above the
-    ;; expected heading.
-    (goto-char (line-end-position))
-    (let ((c1 (make-marker)))
-      (set-marker c1 (point) (current-buffer))
-      (set-register ?^ c1)
-      (message "Link copied"))))
+function `org-super-links-insert-link' is used to replace `org-insert-link'.  This
+has not been thoroughly tested outside of links to/form org files.
+GOTO and KEYS are unused.
+MODIFIED version."
+    (interactive "P")
+    (ignore GOTO)
+    (ignore KEYS)
+    (save-excursion
+      (let ((c1 (make-marker))
+            (headline (org-get-heading t t t t)))  ;; 获取标题行
+        (set-marker c1 (point) (current-buffer))
+        (set-register ?^ (cons c1 headline))  ;; 存储标记和标题行
+        (message "Link copied with headline: %s" headline))))
 
 ;;;###autoload
 (defun org-super-links-insert-link ()
-  "Insert a super link from the register."
+  "Insert a super link from the register.
+MODIFIED version: extracts marker and headline from register."
   (interactive)
   (let* ((target (get-register ?^)))
     (if target
-	(progn
-	  (org-super-links--insert-link target)
-	  (set-register ?^ nil))
+        (let ((marker (car target))
+              (headline (cdr target)))
+          (org-super-links--insert-link marker headline)
+          (set-register ?^ nil))
       (message "No link to insert!"))))
 
 ;;;###autoload
